@@ -1,2 +1,2 @@
-streamlit==1.27.0
 ultralytics==8.0.187
+streamlit==1.27.0

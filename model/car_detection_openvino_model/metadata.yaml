@@ -1,0 +1,14 @@
+description: Ultralytics car_detection model trained on /kaggle/working/vhdetection.yaml
+author: Ultralytics
+license: AGPL-3.0 https://ultralytics.com/license
+date: '2024-02-19T11:00:14.232643'
+version: 8.1.15
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: xe1banh
+  1: xe2banh

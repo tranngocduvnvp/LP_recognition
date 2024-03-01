@@ -1,0 +1,13 @@
+description: Ultralytics best_lp_detect model trained on /kaggle/working/coco128.yaml
+author: Ultralytics
+license: AGPL-3.0 https://ultralytics.com/license
+date: '2024-01-30T09:36:28.978861'
+version: 8.0.239
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: LP

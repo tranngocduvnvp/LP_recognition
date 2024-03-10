@@ -1,0 +1,13 @@
+description: Ultralytics best_lp_detection_YOLOv8n model trained on /kaggle/working/lpdetection.yaml
+author: Ultralytics
+license: AGPL-3.0 https://ultralytics.com/license
+date: '2024-03-10T10:53:22.098863'
+version: 8.0.170
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: lp

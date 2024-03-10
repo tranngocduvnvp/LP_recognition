@@ -1,16 +1,34 @@
-from ultralytics import YOLO
 import streamlit as st
-
 from typing import Tuple, Dict
-import cv2
 import numpy as np
-from ultralytics.utils.plotting import colors
-from ultralytics.utils import ops
 import torch
-import numpy as np
 import random
-import tqdm
+import openvino as ov
+
+import cv2
+from IPython.display import display
+from IPython.display import Image as  Image_DIS
+from PIL import Image as Image_PIL
+from notebook_utils import  VideoPlayer
+from tqdm import tqdm
+
+from ultralytics.cfg import get_cfg
+from ultralytics.data.converter import coco80_to_coco91_class
+from ultralytics.data.utils import check_det_dataset
+from ultralytics.engine.validator import BaseValidator as Validator
+from ultralytics.models.yolo import YOLO
+from ultralytics.utils import DATASETS_DIR
+from ultralytics.utils import DEFAULT_CFG
+from ultralytics.utils import ops
 from ultralytics.utils.metrics import ConfusionMatrix
+from ultralytics.utils.plotting import colors
+
+import re
+import subprocess
+from functools import partial
+from pathlib import Path
+from typing import Any, Dict, Tuple
+
 
 
 def plot_one_box(box:np.ndarray, img:np.ndarray,
@@ -192,7 +210,125 @@ def postprocess(
     return results
 
 
+def print_stats(stats:np.ndarray, total_images:int, total_objects:int):
+    """
+    Helper function for printing accuracy statistic
+    Parameters:
+        stats: (Dict[str, float]) - dictionary with aggregated accuracy metrics statistics, key is metric name, value is metric value
+        total_images (int) -  number of evaluated images
+        total objects (int)
+    Returns:
+        None
+    """
+    print("Boxes:")
+    mp, mr, map50, mean_ap = stats['metrics/precision(B)'], stats['metrics/recall(B)'], stats['metrics/mAP50(B)'], stats['metrics/mAP50-95(B)']
+    # Print results
+    s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Labels', 'Precision', 'Recall', 'mAP@.5', 'mAP@.5:.95')
+    print(s)
+    pf = '%20s' + '%12i' * 2 + '%12.3g' * 4  # print format
+    print(pf % ('all', total_images, total_objects, mp, mr, map50, mean_ap))
+    if 'metrics/precision(M)' in stats:
+        s_mp, s_mr, s_map50, s_mean_ap = stats['metrics/precision(M)'], stats['metrics/recall(M)'], stats['metrics/mAP50(M)'], stats['metrics/mAP50-95(M)']
+        # Print results
+        s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Labels', 'Precision', 'Recall', 'mAP@.5', 'mAP@.5:.95')
+        print(s)
+        pf = '%20s' + '%12i' * 2 + '%12.3g' * 4  # print format
+        print(pf % ('all', total_images, total_objects, s_mp, s_mr, s_map50, s_mean_ap))
 
+
+def detect(image:np.ndarray, model:ov.Model, nc=2):
+    """
+    OpenVINO YOLOv8 model inference function. Preprocess image, runs model inference and postprocess results using NMS.
+    Parameters:
+        image (np.ndarray): input image.
+        model (Model): OpenVINO compiled model.
+    Returns:
+        detections (np.ndarray): detected boxes in format [x1, y1, x2, y2, score, label]
+    """
+    preprocessed_image = preprocess_image(image)
+    input_tensor = image_to_tensor(preprocessed_image)
+    result = model(input_tensor)
+    boxes = result[model.output(0)]
+    input_hw = input_tensor.shape[2:]
+    # print("boxes:",boxes.shape, "nc:",nc, "input_hw:", input_hw)
+    detections = postprocess(pred_boxes=boxes, input_hw=input_hw, orig_img=image, nc=nc)
+    return detections
+
+def test(model:ov.Model, core:ov.Core, data_loader:torch.utils.data.DataLoader, validator, num_samples:int = None):
+    """
+    OpenVINO YOLOv8 model accuracy validation function. Runs model validation on dataset and returns metrics
+    Parameters:
+        model (Model): OpenVINO model
+        data_loader (torch.utils.data.DataLoader): dataset loader
+        validator: instance of validator class
+        num_samples (int, *optional*, None): validate model only on specified number samples, if provided
+    Returns:
+        stats: (Dict[str, float]) - dictionary with aggregated accuracy metrics statistics, key is metric name, value is metric value
+    """
+    validator.seen = 0
+    validator.jdict = []
+    validator.stats = []
+    validator.batch_i = 1
+    validator.confusion_matrix = ConfusionMatrix(nc=validator.nc)
+    model.reshape({0: [1, 3, -1, -1]})
+    compiled_model = core.compile_model(model)
+    for batch_i, batch in enumerate(tqdm(data_loader, total=num_samples)):
+        if num_samples is not None and batch_i == num_samples:
+            break
+        batch = validator.preprocess(batch)
+        results = compiled_model(batch["img"])
+        preds = torch.from_numpy(results[compiled_model.output(0)])
+        preds = validator.postprocess(preds)
+        validator.update_metrics(preds, batch)
+    stats = validator.get_stats()
+    return stats
+
+def prepare_validation(model: YOLO, args: Any, folder_imgs) -> Tuple[Validator, torch.utils.data.DataLoader]:
+    validator = model.smart_load("validator")(args)
+    validator.data = check_det_dataset(args.data)
+    dataset = validator.data["val"]
+    print(f"{dataset}")
+
+    data_loader = validator.get_dataloader(folder_imgs, 1)
+
+    validator = model.smart_load("validator")(args)
+
+    validator.is_coco = True
+    validator.class_map = coco80_to_coco91_class()
+    validator.names = model.model.names
+    validator.metrics.names = validator.names
+    validator.nc = model.model.model[-1].nc
+    validator.nm = 32
+    validator.process = ops.process_mask
+    validator.plot_masks = []
+
+    return validator, data_loader
+
+def read_model_ov(path, device):
+    core = ov.Core()
+    det_ov_model = core.read_model(path)
+    if device.value != "CPU":
+        det_ov_model.reshape({0: [1, 3, 640, 640]})
+    det_compiled_model = core.compile_model(det_ov_model, device.value)
+    return det_ov_model, det_compiled_model
+
+def show_detect_torch(torch_model, path):
+    res = torch_model(path, imgsz=640, conf=0.25)
+    return Image_PIL.fromarray(res[0].plot()[:, :, ::-1])
+
+def show_detect_openvino(det_compiled_model, path, label_map, nc=2):
+    input_image = np.array(Image_PIL.open(path))
+    detections = detect(input_image, det_compiled_model, nc=nc)[0]
+    image_with_boxes = draw_results(detections, input_image, label_map)
+    return Image_PIL.fromarray(image_with_boxes)
+
+def validation_ov(path_cfg, model_torch, model_ov, folder_imgs):
+    core = ov.Core()
+    args = get_cfg(cfg=DEFAULT_CFG)
+    args.data = str(path_cfg)
+    validator, data_loader = prepare_validation(model_torch, args, folder_imgs)
+    fp_det_stats = test(model_ov, core, data_loader, validator)
+    print_stats(fp_det_stats, validator.seen, validator.nt_per_class.sum())
 
 @st.cache_resource
 def load_model(path):
